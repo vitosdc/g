@@ -92,32 +92,29 @@ public class AdvancedStatsWindow extends JDialog {
         try {
             Connection conn = DatabaseManager.getInstance().getConnection();
             
-            Calendar cal = Calendar.getInstance();
             int months = switch(periodCombo.getSelectedIndex()) {
                 case 0 -> 6;
                 case 1 -> 12;
                 case 2 -> 24;
                 default -> 12;
             };
-            cal.add(Calendar.MONTH, -months);
 
-            // QUERY SEMPLIFICATA - SENZA FILTRI DATE COMPLESSI
-            String query = """
-                SELECT strftime('%Y-%m', o.data_ordine) as mese,
-                        SUM(o.totale) as totale,
-                        COUNT(*) as num_ordini
-                FROM ordini o
-                WHERE o.data_ordine IS NOT NULL
-                GROUP BY mese
-                ORDER BY mese
-            """;
+            // FIXED: Query with proper period filtering
+            String query = "SELECT strftime('%Y-%m', o.data_ordine) as mese, " +
+                          "SUM(o.totale) as totale, " +
+                          "COUNT(*) as num_ordini " +
+                          "FROM ordini o " +
+                          "WHERE o.data_ordine IS NOT NULL " +
+                          "AND o.data_ordine >= datetime('now', '-" + months + " months') " +
+                          "GROUP BY mese " +
+                          "ORDER BY mese";
 
             System.out.println("Loading sales data for last " + months + " months");
 
             // FIXED: Thread-safe access to monthlySales
             Map<String, double[]> newMonthlySales = new HashMap<>();
-            try (PreparedStatement pstmt = conn.prepareStatement(query)) {
-                ResultSet rs = pstmt.executeQuery();
+            try (Statement stmt = conn.createStatement();
+                 ResultSet rs = stmt.executeQuery(query)) {
 
                 while (rs.next()) {
                     String month = rs.getString("mese");
@@ -126,6 +123,7 @@ public class AdvancedStatsWindow extends JDialog {
                         double total = rs.getDouble("totale");
                         int numOrders = rs.getInt("num_ordini");
                         newMonthlySales.put(month, new double[]{total, numOrders});
+                        System.out.println("Month: " + month + ", Total: €" + total + ", Orders: " + numOrders);
                     }
                 }
                 
@@ -236,21 +234,19 @@ public class AdvancedStatsWindow extends JDialog {
                 default -> 12;
             };
 
-            // QUERY CON FILTRO PERIODO PER PRODOTTI - USANDO datetime('now')
-            String query = """
-                SELECT COALESCE(p.nome, 'Product N/A') as nome,
-                        SUM(d.quantita) as quantita_totale,
-                        SUM(d.quantita * d.prezzo_unitario) as fatturato,
-                        COUNT(DISTINCT o.id) as num_ordini
-                FROM dettagli_ordine d
-                LEFT JOIN prodotti p ON d.prodotto_id = p.id
-                LEFT JOIN ordini o ON d.ordine_id = o.id
-                WHERE o.data_ordine IS NOT NULL
-                  AND o.data_ordine >= datetime('now', '-""" + months + """ months')
-                GROUP BY d.prodotto_id, p.nome
-                ORDER BY fatturato DESC
-                LIMIT 10
-            """;
+            // FIXED: Properly closed string literal
+            String query = "SELECT COALESCE(p.nome, 'Product N/A') as nome, " +
+                          "SUM(d.quantita) as quantita_totale, " +
+                          "SUM(d.quantita * d.prezzo_unitario) as fatturato, " +
+                          "COUNT(DISTINCT o.id) as num_ordini " +
+                          "FROM dettagli_ordine d " +
+                          "LEFT JOIN prodotti p ON d.prodotto_id = p.id " +
+                          "LEFT JOIN ordini o ON d.ordine_id = o.id " +
+                          "WHERE o.data_ordine IS NOT NULL " +
+                          "AND o.data_ordine >= datetime('now', '-" + months + " months') " +
+                          "GROUP BY d.prodotto_id, p.nome " +
+                          "ORDER BY fatturato DESC " +
+                          "LIMIT 10";
 
             System.out.println("Loading products data for last " + months + " months");
 
