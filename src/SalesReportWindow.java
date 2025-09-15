@@ -49,7 +49,7 @@ public class SalesReportWindow extends JDialog {
         startDateField = new JTextField(10);
         endDateField = new JTextField(10);
         
-        // Imposta date predefinite (ultimo mese)
+        // IMPOSTA DATE PREDEFINITE (ULTIMO MESE) - FIX PRINCIPALE
         Calendar cal = Calendar.getInstance();
         endDateField.setText(dateFormat.format(cal.getTime()));
         cal.add(Calendar.MONTH, -1);
@@ -115,62 +115,111 @@ public class SalesReportWindow extends JDialog {
     }
     
     private void loadDefaultData() {
-        loadReportData();
+        // CARICA AUTOMATICAMENTE I DATI CON LE DATE PREDEFINITE
+        SwingUtilities.invokeLater(() -> loadReportData());
     }
     
     private void loadReportData() {
         tableModel.setRowCount(0);
         try {
-            // Parsing delle date
-            Date startDate = DateUtils.parseDate(startDateField.getText(), dateFormat);
-            Date endDate = DateUtils.parseDate(endDateField.getText(), dateFormat);
-            
-            if (startDate == null || endDate == null) {
-                JOptionPane.showMessageDialog(this,
-                    "Invalid date format. Use the format dd/MM/yyyy",
-                    "Error", JOptionPane.ERROR_MESSAGE);
-                return;
-            }
+            // PARSING DELLE DATE - SEMPLIFICATO
+            String startDateText = startDateField.getText().trim();
+            String endDateText = endDateField.getText().trim();
             
             Connection conn = DatabaseManager.getInstance().getConnection();
-            String query = """
-                SELECT o.*, c.nome || ' ' || c.cognome as cliente_nome
-                FROM ordini o
-                LEFT JOIN clienti c ON o.cliente_id = c.id
-                WHERE DATE(o.data_ordine) BETWEEN DATE(?) AND DATE(?)
-                ORDER BY o.data_ordine DESC
-            """;
+            String query;
+            PreparedStatement pstmt = null;
             
-            try (PreparedStatement pstmt = conn.prepareStatement(query)) {
-                pstmt.setDate(1, DateUtils.toSqlDate(startDate));
-                pstmt.setDate(2, DateUtils.toSqlDate(endDate));
+            // Se le date sono vuote, carica tutto
+            if (startDateText.isEmpty() || endDateText.isEmpty()) {
+                query = """
+                    SELECT o.id, o.data_ordine, o.stato, o.totale,
+                           COALESCE(c.nome || ' ' || c.cognome, 'N/A') as cliente_nome
+                    FROM ordini o
+                    LEFT JOIN clienti c ON o.cliente_id = c.id
+                    ORDER BY o.data_ordine DESC
+                    LIMIT 1000
+                """;
+                pstmt = conn.prepareStatement(query);
+                System.out.println("Loading all orders (no date filter)");
+            } else {
+                // Prova a parsare le date
+                Date startDate = null;
+                Date endDate = null;
                 
+                try {
+                    startDate = DateUtils.parseDate(startDateText, dateFormat);
+                    endDate = DateUtils.parseDate(endDateText, dateFormat);
+                } catch (Exception e) {
+                    System.err.println("Error parsing dates: " + e.getMessage());
+                }
+                
+                if (startDate == null || endDate == null) {
+                    JOptionPane.showMessageDialog(this,
+                        "Invalid date format. Use dd/MM/yyyy\nLoading all orders instead.",
+                        "Warning", JOptionPane.WARNING_MESSAGE);
+                    
+                    // Fallback: carica tutto
+                    query = """
+                        SELECT o.id, o.data_ordine, o.stato, o.totale,
+                               COALESCE(c.nome || ' ' || c.cognome, 'N/A') as cliente_nome
+                        FROM ordini o
+                        LEFT JOIN clienti c ON o.cliente_id = c.id
+                        ORDER BY o.data_ordine DESC
+                        LIMIT 1000
+                    """;
+                    pstmt = conn.prepareStatement(query);
+                } else {
+                    // FILTRO DATE CON APPROCCIO STRING SEMPLICE
+                    query = """
+                        SELECT o.id, o.data_ordine, o.stato, o.totale,
+                               COALESCE(c.nome || ' ' || c.cognome, 'N/A') as cliente_nome
+                        FROM ordini o
+                        LEFT JOIN clienti c ON o.cliente_id = c.id
+                        WHERE o.data_ordine >= ? AND o.data_ordine <= ?
+                        ORDER BY o.data_ordine DESC
+                    """;
+                    
+                    pstmt = conn.prepareStatement(query);
+                    
+                    // CONVERTI DATE IN STRINGA ISO PER IL CONFRONTO
+                    String startDateISO = String.format("%04d-%02d-%02d 00:00:00",
+                        startDate.getYear() + 1900, startDate.getMonth() + 1, startDate.getDate());
+                    String endDateISO = String.format("%04d-%02d-%02d 23:59:59",
+                        endDate.getYear() + 1900, endDate.getMonth() + 1, endDate.getDate());
+                    
+                    pstmt.setString(1, startDateISO);
+                    pstmt.setString(2, endDateISO);
+                    
+                    System.out.println("Filtering orders from " + startDateISO + " to " + endDateISO);
+                }
+            }
+            
+            try (ResultSet rs = pstmt.executeQuery()) {
                 double totalSales = 0;
                 int totalOrders = 0;
                 
-                try (ResultSet rs = pstmt.executeQuery()) {
-                    while (rs.next()) {
-                        Vector<Object> row = new Vector<>();
-                        
-                        // FIXED: Use DateUtils for proper date parsing
-                        Date orderDate = DateUtils.parseDate(rs, "data_ordine");
-                        if (orderDate != null) {
-                            row.add(DateUtils.formatDate(orderDate, dateFormat));
-                        } else {
-                            row.add("");
-                        }
-                        
-                        row.add(rs.getInt("id"));
-                        row.add(rs.getString("cliente_nome"));
-                        row.add(rs.getString("stato"));
-                        double total = rs.getDouble("totale");
-                        row.add(String.format("%.2f", total));
-                        
-                        tableModel.addRow(row);
-                        
-                        totalSales += total;
-                        totalOrders++;
+                while (rs.next()) {
+                    Vector<Object> row = new Vector<>();
+                    
+                    // PARSING DATA
+                    Date orderDate = DateUtils.parseDate(rs, "data_ordine");
+                    if (orderDate != null) {
+                        row.add(DateUtils.formatDate(orderDate, dateFormat));
+                    } else {
+                        row.add("N/A");
                     }
+                    
+                    row.add(rs.getInt("id"));
+                    row.add(rs.getString("cliente_nome"));
+                    row.add(rs.getString("stato"));
+                    double total = rs.getDouble("totale");
+                    row.add(String.format("%.2f", total));
+                    
+                    tableModel.addRow(row);
+                    
+                    totalSales += total;
+                    totalOrders++;
                 }
                 
                 // Aggiorna statistiche
@@ -181,7 +230,12 @@ public class SalesReportWindow extends JDialog {
                 } else {
                     averageOrderLabel.setText("Average per Order: € 0.00");
                 }
+                
+                System.out.println("Loaded " + totalOrders + " orders, total sales: €" + totalSales);
             }
+            
+            if (pstmt != null) pstmt.close();
+            
         } catch (Exception e) {
             e.printStackTrace();
             JOptionPane.showMessageDialog(this,
@@ -209,10 +263,11 @@ public class SalesReportWindow extends JDialog {
             try {
                 Connection conn = DatabaseManager.getInstance().getConnection();
                 String query = """
-                    SELECT p.nome as prodotto_nome, d.quantita, d.prezzo_unitario,
+                    SELECT COALESCE(p.nome, 'Product N/A') as prodotto_nome, 
+                           d.quantita, d.prezzo_unitario,
                            (d.quantita * d.prezzo_unitario) as totale
                     FROM dettagli_ordine d
-                    JOIN prodotti p ON d.prodotto_id = p.id
+                    LEFT JOIN prodotti p ON d.prodotto_id = p.id
                     WHERE d.ordine_id = ?
                 """;
                 try (PreparedStatement pstmt = conn.prepareStatement(query)) {
