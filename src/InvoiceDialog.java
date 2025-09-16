@@ -22,6 +22,7 @@ public class InvoiceDialog extends JDialog {
     private JLabel totaleLabel;
     private SimpleDateFormat dateFormat;
     private Map<Integer, Product> productsCache;
+    private volatile boolean isUpdatingTotals = false; // Thread-safe flag
     
     public InvoiceDialog(JDialog parent, Invoice invoice) {
         super(parent, invoice == null ? "New Invoice" : "Modify Invoice", true);
@@ -93,20 +94,11 @@ public class InvoiceDialog extends JDialog {
         
         // Products table
         String[] columns = {"Code", "Product", "Quantity", "Unit Price", "VAT Rate", "Total"};
-        itemsTableModel = new DefaultTableModel(columns, 0) {
-            @Override
-            public boolean isCellEditable(int row, int column) {
-                return column == 2; // Only quantity is editable
-            }
-        };
+        itemsTableModel = new InvoiceTableModel(columns, 0);
         itemsTable = new JTable(itemsTableModel);
         
-        // Update totals when quantity changes
-        itemsTableModel.addTableModelListener(e -> {
-            if (e.getType() == javax.swing.event.TableModelEvent.UPDATE) {
-                updateTotals();
-            }
-        });
+        // Configure table editors for type safety
+        configureTableEditors();
         
         // Panel for table buttons
         JPanel tableButtonPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
@@ -154,6 +146,139 @@ public class InvoiceDialog extends JDialog {
         mainPanel.add(buttonPanel, BorderLayout.SOUTH);
         
         add(mainPanel);
+    }
+    
+    // Custom table model for type safety
+    private class InvoiceTableModel extends DefaultTableModel {
+        private final Class<?>[] columnTypes = {
+            String.class,  // Code
+            String.class,  // Product
+            Integer.class, // Quantity
+            String.class,  // Unit Price (formatted as string)
+            String.class,  // VAT Rate (formatted as string)
+            String.class   // Total (formatted as string)
+        };
+        
+        public InvoiceTableModel(String[] columnNames, int rowCount) {
+            super(columnNames, rowCount);
+        }
+        
+        @Override
+        public Class<?> getColumnClass(int columnIndex) {
+            if (columnIndex < columnTypes.length) {
+                return columnTypes[columnIndex];
+            }
+            return Object.class;
+        }
+        
+        @Override
+        public boolean isCellEditable(int row, int column) {
+            return column == 2; // Only quantity column is editable
+        }
+        
+        @Override
+        public void setValueAt(Object value, int row, int col) {
+            if (col == 2) { // Quantity column
+                try {
+                    int intValue;
+                    if (value instanceof String) {
+                        intValue = Integer.parseInt(((String) value).trim());
+                    } else if (value instanceof Integer) {
+                        intValue = (Integer) value;
+                    } else {
+                        intValue = Integer.parseInt(value.toString().trim());
+                    }
+                    
+                    if (intValue < 0) {
+                        throw new NumberFormatException("Negative quantity not allowed");
+                    }
+                    
+                    super.setValueAt(intValue, row, col);
+                    
+                    // Trigger totals update after successful value setting
+                    SwingUtilities.invokeLater(() -> updateTotals());
+                    
+                } catch (NumberFormatException e) {
+                    // Revert to previous value or set to 1
+                    super.setValueAt(1, row, col);
+                    SwingUtilities.invokeLater(() -> {
+                        JOptionPane.showMessageDialog(InvoiceDialog.this,
+                            "Invalid quantity. Please enter a positive integer.",
+                            "Invalid Input", JOptionPane.WARNING_MESSAGE);
+                    });
+                }
+            } else {
+                super.setValueAt(value, row, col);
+            }
+        }
+    }
+    
+    // Configure table cell editors for better type safety
+    private void configureTableEditors() {
+        // Set up a custom editor for the quantity column to ensure Integer values
+        itemsTable.getColumnModel().getColumn(2).setCellEditor(new DefaultCellEditor(new JTextField()) {
+            @Override
+            public boolean stopCellEditing() {
+                try {
+                    String value = (String) getCellEditorValue();
+                    int intValue = Integer.parseInt(value.trim());
+                    if (intValue < 0) {
+                        throw new NumberFormatException("Quantity cannot be negative");
+                    }
+                    return super.stopCellEditing();
+                } catch (NumberFormatException e) {
+                    JOptionPane.showMessageDialog(InvoiceDialog.this,
+                        "Please enter a valid positive integer for quantity",
+                        "Invalid Input", JOptionPane.ERROR_MESSAGE);
+                    return false; // Don't stop editing
+                }
+            }
+        });
+    }
+    
+    // Safe type conversion methods
+    private int parseInteger(Object obj) {
+        if (obj instanceof Integer) {
+            return (Integer) obj;
+        }
+        if (obj instanceof String) {
+            try {
+                return Integer.parseInt(((String) obj).trim());
+            } catch (NumberFormatException e) {
+                return 0; // Default value for invalid input
+            }
+        }
+        if (obj != null) {
+            try {
+                return Integer.parseInt(obj.toString().trim());
+            } catch (NumberFormatException e) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+    
+    private double parseDouble(Object obj) {
+        if (obj instanceof Double) {
+            return (Double) obj;
+        }
+        if (obj instanceof String) {
+            try {
+                String str = ((String) obj).replace(",", ".");
+                return Double.parseDouble(str.trim());
+            } catch (NumberFormatException e) {
+                return 0.0; // Default value for invalid input
+            }
+        }
+        if (obj != null) {
+            try {
+                String str = obj.toString().replace(",", ".");
+                return Double.parseDouble(str.trim());
+            } catch (NumberFormatException e) {
+                return 0.0;
+            }
+        }
+        return 0.0;
     }
     
     private void loadClienti() {
@@ -245,7 +370,7 @@ public class InvoiceDialog extends JDialog {
             Vector<Object> row = new Vector<>();
             row.add(item.getProdottoCodice());
             row.add(item.getProdottoNome());
-            row.add(item.getQuantita());
+            row.add(item.getQuantita()); // Integer value
             row.add(String.format("%.2f", item.getPrezzoUnitario()));
             row.add(String.format("%.2f", item.getAliquotaIva()));
             row.add(String.format("%.2f", item.getTotale()));
@@ -258,50 +383,80 @@ public class InvoiceDialog extends JDialog {
     private void showAddProductDialog() {
         JDialog dialog = new JDialog(this, "Add Product", true);
         dialog.setLayout(new BorderLayout(10, 10));
-        dialog.setSize(400, 200);
-        dialog.setLocationRelativeTo(this);
         
-        JPanel panel = new JPanel(new GridBagLayout());
+        // Pannello principale con padding
+        JPanel mainPanel = new JPanel(new BorderLayout(10, 10));
+        mainPanel.setBorder(BorderFactory.createEmptyBorder(15, 15, 15, 15));
+        
+        // Pannello del form con GridBagLayout migliorato
+        JPanel formPanel = new JPanel(new GridBagLayout());
         GridBagConstraints gbc = new GridBagConstraints();
-        gbc.insets = new Insets(5, 5, 5, 5);
-        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.insets = new Insets(8, 8, 8, 8);
+        gbc.anchor = GridBagConstraints.WEST;
         
         // Product
         gbc.gridx = 0; gbc.gridy = 0;
-        panel.add(new JLabel("Product:"), gbc);
+        gbc.fill = GridBagConstraints.NONE;
+        gbc.weightx = 0.0;
+        formPanel.add(new JLabel("Product:"), gbc);
         
         gbc.gridx = 1;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.weightx = 1.0;
         JComboBox<ProductComboItem> productCombo = new JComboBox<>();
+        productCombo.setPreferredSize(new Dimension(300, 25));
         for (Product product : productsCache.values()) {
             productCombo.addItem(new ProductComboItem(product));
         }
-        panel.add(productCombo, gbc);
+        formPanel.add(productCombo, gbc);
         
         // Quantity
         gbc.gridx = 0; gbc.gridy = 1;
-        panel.add(new JLabel("Quantity:"), gbc);
+        gbc.fill = GridBagConstraints.NONE;
+        gbc.weightx = 0.0;
+        formPanel.add(new JLabel("Quantity:"), gbc);
         
         gbc.gridx = 1;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.weightx = 1.0;
         SpinnerNumberModel spinnerModel = new SpinnerNumberModel(1, 1, 999, 1);
         JSpinner quantitySpinner = new JSpinner(spinnerModel);
-        panel.add(quantitySpinner, gbc);
+        quantitySpinner.setPreferredSize(new Dimension(100, 25));
+        formPanel.add(quantitySpinner, gbc);
         
         // VAT Rate
         gbc.gridx = 0; gbc.gridy = 2;
-        panel.add(new JLabel("VAT Rate %:"), gbc);
+        gbc.fill = GridBagConstraints.NONE;
+        gbc.weightx = 0.0;
+        formPanel.add(new JLabel("VAT Rate %:"), gbc);
         
         gbc.gridx = 1;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.weightx = 1.0;
         JTextField ivaField = new JTextField("22.0");
-        panel.add(ivaField, gbc);
+        ivaField.setPreferredSize(new Dimension(100, 25));
+        formPanel.add(ivaField, gbc);
         
-        // Buttons
-        JPanel buttonPanel = new JPanel();
+        // Pannello dei pulsanti
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 10));
         JButton addButton = new JButton("Add");
         JButton cancelButton = new JButton("Cancel");
+        
+        // Impostare dimensioni preferite per i pulsanti
+        Dimension buttonSize = new Dimension(80, 30);
+        addButton.setPreferredSize(buttonSize);
+        cancelButton.setPreferredSize(buttonSize);
         
         addButton.addActionListener(e -> {
             try {
                 ProductComboItem selectedProduct = (ProductComboItem)productCombo.getSelectedItem();
+                if (selectedProduct == null) {
+                    JOptionPane.showMessageDialog(dialog,
+                        "Please select a product",
+                        "Error", JOptionPane.ERROR_MESSAGE);
+                    return;
+                }
+                
                 int quantity = (int)quantitySpinner.getValue();
                 double aliquotaIva = Double.parseDouble(ivaField.getText().replace(",", "."));
                 
@@ -324,7 +479,7 @@ public class InvoiceDialog extends JDialog {
                 Vector<Object> row = new Vector<>();
                 row.add(selectedProduct.getProduct().getCodice());
                 row.add(selectedProduct.getProduct().getNome());
-                row.add(quantity);
+                row.add(quantity); // Integer value
                 row.add(String.format("%.2f", prezzo));
                 row.add(String.format("%.2f", aliquotaIva));
                 row.add(String.format("%.2f", totale));
@@ -345,8 +500,19 @@ public class InvoiceDialog extends JDialog {
         buttonPanel.add(addButton);
         buttonPanel.add(cancelButton);
         
-        dialog.add(panel, BorderLayout.CENTER);
-        dialog.add(buttonPanel, BorderLayout.SOUTH);
+        // Assemblaggio del pannello principale
+        mainPanel.add(formPanel, BorderLayout.CENTER);
+        mainPanel.add(buttonPanel, BorderLayout.SOUTH);
+        
+        dialog.add(mainPanel);
+        
+        // Impostazioni finestra
+        dialog.pack(); // Adatta automaticamente alle dimensioni del contenuto
+        dialog.setMinimumSize(new Dimension(400, 200)); // Dimensione minima
+        dialog.setLocationRelativeTo(this); // Centra rispetto alla finestra padre
+        dialog.setResizable(true); // Permette il ridimensionamento
+        
+        // Mostra la finestra
         dialog.setVisible(true);
     }
     
@@ -358,30 +524,57 @@ public class InvoiceDialog extends JDialog {
         }
     }
     
-    private void updateTotals() {
-        double imponibile = 0;
-        double totaleIva = 0;
+    // Thread-safe updateTotals method with proper type handling
+    private synchronized void updateTotals() {
+        if (isUpdatingTotals) return;
         
-        for (int i = 0; i < itemsTableModel.getRowCount(); i++) {
-            int quantity = (int)itemsTableModel.getValueAt(i, 2);
-            String prezzoStr = (String)itemsTableModel.getValueAt(i, 3);
-            String aliquotaStr = (String)itemsTableModel.getValueAt(i, 4);
+        isUpdatingTotals = true;
+        try {
+            double imponibile = 0;
+            double totaleIva = 0;
             
-            double price = Double.parseDouble(prezzoStr.replace(",", "."));
-            double aliquotaIva = Double.parseDouble(aliquotaStr.replace(",", "."));
+            for (int i = 0; i < itemsTableModel.getRowCount(); i++) {
+                try {
+                    // Safe parsing of table values
+                    Object quantityObj = itemsTableModel.getValueAt(i, 2);
+                    Object prezzoObj = itemsTableModel.getValueAt(i, 3);
+                    Object aliquotaObj = itemsTableModel.getValueAt(i, 4);
+                    
+                    int quantity = parseInteger(quantityObj);
+                    double price = parseDouble(prezzoObj);
+                    double aliquotaIva = parseDouble(aliquotaObj);
+                    
+                    double subtotal = quantity * price;
+                    double iva = subtotal * (aliquotaIva / 100);
+                    
+                    imponibile += subtotal;
+                    totaleIva += iva;
+                    
+                    // Update the total column for this row
+                    String currentTotal = (String) itemsTableModel.getValueAt(i, 5);
+                    String newTotal = String.format("%.2f", subtotal);
+                    if (!newTotal.equals(currentTotal)) {
+                        itemsTableModel.setValueAt(newTotal, i, 5);
+                    }
+                    
+                } catch (Exception e) {
+                    // Log the error but don't crash the application
+                    System.err.println("Error processing row " + i + ": " + e.getMessage());
+                    // Skip this row and continue
+                    continue;
+                }
+            }
             
-            double subtotal = quantity * price;
-            double iva = subtotal * (aliquotaIva / 100);
+            double totale = imponibile + totaleIva;
             
-            imponibile += subtotal;
-            totaleIva += iva;
+            // Update the labels
+            imponibileLabel.setText(String.format("Taxable Amount: € %.2f", imponibile));
+            ivaLabel.setText(String.format("VAT: € %.2f", totaleIva));
+            totaleLabel.setText(String.format("Total: € %.2f", totale));
+            
+        } finally {
+            isUpdatingTotals = false;
         }
-        
-        double totale = imponibile + totaleIva;
-        
-        imponibileLabel.setText(String.format("Taxable Amount: € %.2f", imponibile));
-        ivaLabel.setText(String.format("VAT: € %.2f", totaleIva));
-        totaleLabel.setText(String.format("Total: € %.2f", totale));
     }
     
     private void saveInvoice() {
@@ -417,7 +610,7 @@ public class InvoiceDialog extends JDialog {
             String stato = (String)statoCombo.getSelectedItem();
             String numero = numeroField.getText();
             
-            // Calculate totals
+            // Calculate totals from labels
             double imponibile = Double.parseDouble(imponibileLabel.getText()
                 .replace("Taxable Amount: € ", "").replace(",", "."));
             double iva = Double.parseDouble(ivaLabel.getText()
@@ -455,37 +648,7 @@ public class InvoiceDialog extends JDialog {
                     }
                     
                     // Insert invoice details
-                    String detailQuery = """
-                        INSERT INTO dettagli_fattura 
-                        (fattura_id, prodotto_id, quantita, prezzo_unitario, aliquota_iva, totale)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """;
-                    try (PreparedStatement pstmt = conn.prepareStatement(detailQuery)) {
-                        for (int i = 0; i < itemsTableModel.getRowCount(); i++) {
-                            String codice = (String)itemsTableModel.getValueAt(i, 0);
-                            int prodottoId = -1;
-                            for (Product p : productsCache.values()) {
-                                if (p.getCodice().equals(codice)) {
-                                    prodottoId = p.getId();
-                                    break;
-                                }
-                            }
-                            if (prodottoId == -1) continue;
-                            
-                            int quantita = (int)itemsTableModel.getValueAt(i, 2);
-                            double prezzoUnitario = Double.parseDouble(((String)itemsTableModel.getValueAt(i, 3)).replace(",", "."));
-                            double aliquotaIva = Double.parseDouble(((String)itemsTableModel.getValueAt(i, 4)).replace(",", "."));
-                            double totaleProdotto = quantita * prezzoUnitario;
-                            
-                            pstmt.setInt(1, invoiceId);
-                            pstmt.setInt(2, prodottoId);
-                            pstmt.setInt(3, quantita);
-                            pstmt.setDouble(4, prezzoUnitario);
-                            pstmt.setDouble(5, aliquotaIva);
-                            pstmt.setDouble(6, totaleProdotto);
-                            pstmt.executeUpdate();
-                        }
-                    }
+                    insertInvoiceDetails(conn, invoiceId);
                     
                 } else { // Modify existing invoice
                     // Update the invoice
@@ -513,37 +676,7 @@ public class InvoiceDialog extends JDialog {
                     }
                     
                     // Insert new details
-                    String detailQuery = """
-                        INSERT INTO dettagli_fattura 
-                        (fattura_id, prodotto_id, quantita, prezzo_unitario, aliquota_iva, totale)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """;
-                    try (PreparedStatement pstmt = conn.prepareStatement(detailQuery)) {
-                        for (int i = 0; i < itemsTableModel.getRowCount(); i++) {
-                            String codice = (String)itemsTableModel.getValueAt(i, 0);
-                            int prodottoId = -1;
-                            for (Product p : productsCache.values()) {
-                                if (p.getCodice().equals(codice)) {
-                                    prodottoId = p.getId();
-                                    break;
-                                }
-                            }
-                            if (prodottoId == -1) continue;
-                            
-                            int quantita = (int)itemsTableModel.getValueAt(i, 2);
-                            double prezzoUnitario = Double.parseDouble(((String)itemsTableModel.getValueAt(i, 3)).replace(",", "."));
-                            double aliquotaIva = Double.parseDouble(((String)itemsTableModel.getValueAt(i, 4)).replace(",", "."));
-                            double totaleProdotto = quantita * prezzoUnitario;
-                            
-                            pstmt.setInt(1, invoice.getId());
-                            pstmt.setInt(2, prodottoId);
-                            pstmt.setInt(3, quantita);
-                            pstmt.setDouble(4, prezzoUnitario);
-                            pstmt.setDouble(5, aliquotaIva);
-                            pstmt.setDouble(6, totaleProdotto);
-                            pstmt.executeUpdate();
-                        }
-                    }
+                    insertInvoiceDetails(conn, invoice.getId());
                 }
                 
                 conn.commit();
@@ -562,6 +695,40 @@ public class InvoiceDialog extends JDialog {
             JOptionPane.showMessageDialog(this,
                 "Error while saving the invoice: " + e.getMessage(),
                 "Error", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+    
+    private void insertInvoiceDetails(Connection conn, int invoiceId) throws SQLException {
+        String detailQuery = """
+            INSERT INTO dettagli_fattura 
+            (fattura_id, prodotto_id, quantita, prezzo_unitario, aliquota_iva, totale)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """;
+        try (PreparedStatement pstmt = conn.prepareStatement(detailQuery)) {
+            for (int i = 0; i < itemsTableModel.getRowCount(); i++) {
+                String codice = (String)itemsTableModel.getValueAt(i, 0);
+                int prodottoId = -1;
+                for (Product p : productsCache.values()) {
+                    if (p.getCodice().equals(codice)) {
+                        prodottoId = p.getId();
+                        break;
+                    }
+                }
+                if (prodottoId == -1) continue;
+                
+                int quantita = parseInteger(itemsTableModel.getValueAt(i, 2));
+                double prezzoUnitario = parseDouble(itemsTableModel.getValueAt(i, 3));
+                double aliquotaIva = parseDouble(itemsTableModel.getValueAt(i, 4));
+                double totaleProdotto = quantita * prezzoUnitario;
+                
+                pstmt.setInt(1, invoiceId);
+                pstmt.setInt(2, prodottoId);
+                pstmt.setInt(3, quantita);
+                pstmt.setDouble(4, prezzoUnitario);
+                pstmt.setDouble(5, aliquotaIva);
+                pstmt.setDouble(6, totaleProdotto);
+                pstmt.executeUpdate();
+            }
         }
     }
     
